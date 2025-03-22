@@ -6,6 +6,9 @@ const punchCountElement = document.getElementById('punch-count');
 const punchRateElement = document.getElementById('punch-rate');
 const startBtn = document.getElementById('start-btn');
 const resetBtn = document.getElementById('reset-btn');
+const punchIndicator = document.getElementById('punch-indicator');
+const videoContainer = document.querySelector('.video-container');
+const punchCountBox = document.querySelector('.stat-box:first-child');
 
 // Application state
 let model;
@@ -15,11 +18,19 @@ let punchCount = 0;
 let punchHistory = [];
 let lastPoseData = null;
 let armExtendedState = { left: false, right: false };
+let previousWristZ = { left: 0, right: 0 };
+let wristZVelocity = { left: 0, right: 0 };
+let previousWristArea = { left: 0, right: 0 };
+let wristAreaChange = { left: 0, right: 0 };
+let frameCount = 0;
 
 // Constants
 const PUNCH_THRESHOLD = 0.25; // How far the wrist must extend to count as a punch
 const PUNCH_COOLDOWN = 500; // Minimum time (ms) between punches
 const CONFIDENCE_THRESHOLD = 0.5; // Minimum confidence for keypoints
+const FORWARD_PUNCH_THRESHOLD = 0.03; // Threshold for detecting forward punches (z-axis)
+const AREA_CHANGE_THRESHOLD = 0.1; // Threshold for detecting area changes (forward motion)
+const WRIST_AREA_RADIUS = 15; // Radius for calculating wrist area
 
 // Initialize the application
 async function init() {
@@ -76,6 +87,9 @@ async function detectPose() {
             drawPose(pose);
             detectPunch(pose);
             updatePunchRate();
+            
+            // Increment frame counter for debugging
+            frameCount++;
         }
     } catch (error) {
         console.error('Error detecting pose:', error);
@@ -222,8 +236,49 @@ function checkArmPunch(side, keypointMap) {
     // Check if arm is extended (punch thrown)
     const isExtended = extensionRatio > (1 - PUNCH_THRESHOLD);
     
-    // Detect punch (transition from not extended to extended)
-    if (isExtended && !armExtendedState[side]) {
+    // Detect forward punch (toward camera) using multiple approaches
+    
+    // 1. Estimate z-position based on the relative position of wrist to shoulder
+    const currentWristZ = calculateRelativeDepth(shoulder, wrist);
+    
+    // Calculate z-velocity (negative means moving toward camera)
+    if (previousWristZ[side] !== 0) {
+        wristZVelocity[side] = currentWristZ - previousWristZ[side];
+    }
+    
+    // Store current z for next frame comparison
+    previousWristZ[side] = currentWristZ;
+    
+    // 2. Track wrist area changes (when moving toward camera, the area appears to grow)
+    // Calculate current wrist area (simplified as a circle)
+    const currentWristArea = Math.PI * Math.pow(WRIST_AREA_RADIUS * (1 + wrist.score), 2);
+    
+    // Calculate area change rate
+    if (previousWristArea[side] > 0) {
+        wristAreaChange[side] = (currentWristArea - previousWristArea[side]) / previousWristArea[side];
+    }
+    
+    // Store current area for next frame
+    previousWristArea[side] = currentWristArea;
+    
+    // 3. Check if elbow is bent (common in forward punches)
+    const elbowAngle = calculateElbowAngle(shoulder, elbow, wrist);
+    const isElbowBent = elbowAngle < 160; // less than 160 degrees means bent elbow
+    
+    // Detect if there's a significant forward motion
+    const isForwardPunch = (wristZVelocity[side] < -FORWARD_PUNCH_THRESHOLD) || 
+                          (wristAreaChange[side] > AREA_CHANGE_THRESHOLD && isElbowBent);
+    
+    // Debug visualization for forward punch detection
+    if (frameCount % 30 === 0) { // Only log every 30 frames to avoid console spam
+        console.log(`${side} arm - Z velocity: ${wristZVelocity[side].toFixed(4)}, Area change: ${wristAreaChange[side].toFixed(4)}, Elbow angle: ${elbowAngle.toFixed(1)}`);
+    }
+    
+    // Detect punch (either extended arm or forward motion)
+    const isPunching = isExtended || isForwardPunch;
+    
+    // Detect punch (transition from not punching to punching)
+    if (isPunching && !armExtendedState[side]) {
         const now = Date.now();
         
         // Check if enough time has passed since the last punch
@@ -235,19 +290,69 @@ function checkArmPunch(side, keypointMap) {
             // Add to punch history
             punchHistory.push({
                 time: now,
-                side: side
+                side: side,
+                type: isForwardPunch ? 'forward' : 'extended'
             });
             
             // Visual feedback
             document.body.classList.add('punch-detected');
+            videoContainer.classList.add('punch-detected');
+            punchCountBox.classList.add('highlight');
+            punchCountElement.classList.add('highlight');
+            
+            // Show punch indicator with the type of punch
+            punchIndicator.textContent = `${side.charAt(0).toUpperCase() + side.slice(1)} ${isForwardPunch ? 'Forward' : 'Extended'} Punch!`;
+            punchIndicator.classList.add('visible');
+            
+            // Remove visual feedback after a short delay
             setTimeout(() => {
                 document.body.classList.remove('punch-detected');
-            }, 200);
+                videoContainer.classList.remove('punch-detected');
+                punchCountBox.classList.remove('highlight');
+                punchCountElement.classList.remove('highlight');
+                punchIndicator.classList.remove('visible');
+            }, 800);
+            
+            // Log punch type for debugging
+            console.log(`Detected ${side} ${isForwardPunch ? 'forward' : 'extended'} punch`);
         }
     }
     
     // Update arm state
-    armExtendedState[side] = isExtended;
+    armExtendedState[side] = isPunching;
+}
+
+// Calculate the relative depth of a point based on its apparent size
+function calculateRelativeDepth(referencePoint, targetPoint) {
+    // The distance between points in 2D space can be used to estimate relative depth
+    // When a point moves closer to the camera, it appears larger and moves away from reference points
+    
+    // We use the y-coordinate difference as a simple depth estimation
+    // (This is a simplified approach - in a real 3D system we would use actual depth data)
+    return targetPoint.y - referencePoint.y;
+}
+
+// Calculate the angle at the elbow (in degrees)
+function calculateElbowAngle(shoulder, elbow, wrist) {
+    // Calculate vectors
+    const upperArmX = shoulder.x - elbow.x;
+    const upperArmY = shoulder.y - elbow.y;
+    
+    const forearmX = wrist.x - elbow.x;
+    const forearmY = wrist.y - elbow.y;
+    
+    // Calculate dot product
+    const dotProduct = upperArmX * forearmX + upperArmY * forearmY;
+    
+    // Calculate magnitudes
+    const upperArmMag = Math.sqrt(upperArmX * upperArmX + upperArmY * upperArmY);
+    const forearmMag = Math.sqrt(forearmX * forearmX + forearmY * forearmY);
+    
+    // Calculate angle in radians
+    const angleRad = Math.acos(dotProduct / (upperArmMag * forearmMag));
+    
+    // Convert to degrees
+    return angleRad * (180 / Math.PI);
 }
 
 // Update the punches per minute calculation
