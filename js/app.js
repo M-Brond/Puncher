@@ -25,12 +25,13 @@ let wristAreaChange = { left: 0, right: 0 };
 let frameCount = 0;
 
 // Constants
-const PUNCH_THRESHOLD = 0.25; // How far the wrist must extend to count as a punch
-const PUNCH_COOLDOWN = 500; // Minimum time (ms) between punches
-const CONFIDENCE_THRESHOLD = 0.5; // Minimum confidence for keypoints
-const FORWARD_PUNCH_THRESHOLD = 0.03; // Threshold for detecting forward punches (z-axis)
-const AREA_CHANGE_THRESHOLD = 0.1; // Threshold for detecting area changes (forward motion)
+const PUNCH_THRESHOLD = 0.25; // Decreased back to original value
+const PUNCH_COOLDOWN = 300; // Decreased to make detection more responsive
+const CONFIDENCE_THRESHOLD = 0.5; // Decreased back to original value
+const FORWARD_PUNCH_THRESHOLD = 0.04; // Adjusted for better forward punch detection
+const AREA_CHANGE_THRESHOLD = 0.08; // Decreased for more sensitive area change detection
 const WRIST_AREA_RADIUS = 15; // Radius for calculating wrist area
+const MIN_VELOCITY_THRESHOLD = 0.02; // Decreased for more sensitive movement detection
 
 // Initialize the application
 async function init() {
@@ -242,8 +243,10 @@ function checkArmPunch(side, keypointMap) {
     const currentWristZ = calculateRelativeDepth(shoulder, wrist);
     
     // Calculate z-velocity (negative means moving toward camera)
+    let zVelocity = 0;
     if (previousWristZ[side] !== 0) {
-        wristZVelocity[side] = currentWristZ - previousWristZ[side];
+        zVelocity = currentWristZ - previousWristZ[side];
+        wristZVelocity[side] = zVelocity;
     }
     
     // Store current z for next frame comparison
@@ -254,8 +257,10 @@ function checkArmPunch(side, keypointMap) {
     const currentWristArea = Math.PI * Math.pow(WRIST_AREA_RADIUS * (1 + wrist.score), 2);
     
     // Calculate area change rate
+    let areaChange = 0;
     if (previousWristArea[side] > 0) {
-        wristAreaChange[side] = (currentWristArea - previousWristArea[side]) / previousWristArea[side];
+        areaChange = (currentWristArea - previousWristArea[side]) / previousWristArea[side];
+        wristAreaChange[side] = areaChange;
     }
     
     // Store current area for next frame
@@ -265,17 +270,29 @@ function checkArmPunch(side, keypointMap) {
     const elbowAngle = calculateElbowAngle(shoulder, elbow, wrist);
     const isElbowBent = elbowAngle < 160; // less than 160 degrees means bent elbow
     
-    // Detect if there's a significant forward motion
-    const isForwardPunch = (wristZVelocity[side] < -FORWARD_PUNCH_THRESHOLD) || 
-                          (wristAreaChange[side] > AREA_CHANGE_THRESHOLD && isElbowBent);
+    // Calculate the velocity of the wrist (for detecting quick movements)
+    let wristVelocity = 0;
+    if (lastPoseData && lastPoseData[wristKey]) {
+        const dx = wrist.x - lastPoseData[wristKey].x;
+        const dy = wrist.y - lastPoseData[wristKey].y;
+        wristVelocity = Math.sqrt(dx*dx + dy*dy);
+    }
+    
+    // Detect if there's a significant forward motion with additional conditions
+    const isSignificantVelocity = Math.abs(wristVelocity) > MIN_VELOCITY_THRESHOLD;
+    
+    // Prioritize forward punches (toward webcam)
+    const isForwardPunch = (zVelocity < -FORWARD_PUNCH_THRESHOLD) || 
+                         (areaChange > AREA_CHANGE_THRESHOLD);
     
     // Debug visualization for forward punch detection
     if (frameCount % 30 === 0) { // Only log every 30 frames to avoid console spam
-        console.log(`${side} arm - Z velocity: ${wristZVelocity[side].toFixed(4)}, Area change: ${wristAreaChange[side].toFixed(4)}, Elbow angle: ${elbowAngle.toFixed(1)}`);
+        console.log(`${side} arm - Z velocity: ${zVelocity.toFixed(4)}, Area change: ${areaChange.toFixed(4)}, Elbow angle: ${elbowAngle.toFixed(1)}, Wrist velocity: ${wristVelocity.toFixed(4)}`);
     }
     
     // Detect punch (either extended arm or forward motion)
-    const isPunching = isExtended || isForwardPunch;
+    // Simplified conditions to make detection more responsive
+    const isPunching = isExtended || (isSignificantVelocity && isForwardPunch);
     
     // Detect punch (transition from not punching to punching)
     if (isPunching && !armExtendedState[side]) {
@@ -311,7 +328,7 @@ function checkArmPunch(side, keypointMap) {
                 punchCountBox.classList.remove('highlight');
                 punchCountElement.classList.remove('highlight');
                 punchIndicator.classList.remove('visible');
-            }, 800);
+            }, 500); // Reduced from 800ms for faster feedback
             
             // Log punch type for debugging
             console.log(`Detected ${side} ${isForwardPunch ? 'forward' : 'extended'} punch`);
